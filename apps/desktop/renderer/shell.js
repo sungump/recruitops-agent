@@ -11,6 +11,7 @@ const capabilityFor={
   'profile-import':'persistentProfile','profile-export':'persistentProfile','profile-save':'persistentProfile',
   'profile-create':'persistentProfile','profile-select':'persistentProfile','profile-rename':'persistentProfile','profile-delete':'persistentProfile',
   'demo-enable':'persistentProfile','demo-restore':'persistentProfile','attachment-select':'attachment','attachment-clear':'attachment',
+  'resume-import':'attachment',
   prepare:'repeatedSections','custom-save':'customAnswers','custom-delete':'customAnswers',
   'application-detect':'applications','application-save':'applications','application-save-batch':'applications',
   'application-flush':'offlineQueue','application-cancel':'offlineQueue','application-retry':'offlineQueue','application-correct':'offlineQueue'
@@ -470,9 +471,17 @@ function renderFiller(state) {
     for(const item of personalProfiles)profileSelect.append(new Option(item.name,item.id));
   }
   profileSelect.value=activeProfileId;
+  const scanResume=$('filler-scan-resume');
+  if(scanResume.dataset.signature!==profileOptionsSignature) {
+    scanResume.dataset.signature=profileOptionsSignature;scanResume.replaceChildren();
+    for(const item of personalProfiles)scanResume.append(new Option(item.attachmentName?`${item.name} · ${item.attachmentName}`:`${item.name}（无附件）`,item.id));
+  }
+  scanResume.value=f.profile?.mode==='demo'?'':activeProfileId;
   const canManageProfile=f.profile?.mode!=='demo'&&!profileDirty&&!profileConflict&&!oneClickRun&&!pendingAction&&!f.busy&&!f.busyOperation&&Number.isSafeInteger(profileVersion);
   for(const input of $('filler-profile-editor').querySelectorAll('input,textarea,select,button'))input.disabled=!!oneClickRun||!!pendingAction||!!f.busy||!!f.busyOperation;
   profileSelect.disabled=!personalProfiles.length||!allowed('profile-select')||profileDirty||profileConflict||!Number.isSafeInteger(profileVersion);
+  scanResume.disabled=profileSelect.disabled||personalProfiles.length<2;
+  $('filler-resume-import').disabled=!allowed('resume-import')||profileDirty||profileConflict||!Number.isSafeInteger(profileVersion);
   $('filler-profile-create').disabled=!canManageProfile||!allowed('profile-create')||!validProfileName(profileNameInput.value)||duplicateProfileName;
   profileNameInput.disabled=!canManageProfile;
   $('filler-profile-rename').disabled=!canManageProfile||!activeProfileId||!allowed('profile-rename')||!validProfileName(profileNameInput.value)||
@@ -671,6 +680,16 @@ window.addEventListener('DOMContentLoaded', () => {
     const profileId=$('filler-profile-select').value;
     if(!profileId||profileDirty||profileConflict||!Number.isSafeInteger(profileVersion))return renderFiller(currentState);
     if(profileId!==currentState?.filler?.profile?.activeProfileId)return fillerAction('profile-select',{profileId,expectedVersion:profileVersion});
+  };
+  $('filler-scan-resume').onchange=()=>{
+    const profileId=$('filler-scan-resume').value;
+    if(!profileId||profileDirty||profileConflict||!Number.isSafeInteger(profileVersion))return renderFiller(currentState);
+    if(profileId!==currentState?.filler?.profile?.activeProfileId||currentState?.filler?.profile?.mode==='demo')
+      return fillerAction('profile-select',{profileId,expectedVersion:profileVersion});
+  };
+  $('filler-resume-import').onclick=()=>{
+    if(profileDirty||profileConflict||!Number.isSafeInteger(profileVersion))return;
+    return fillerAction('resume-import',{expectedVersion:profileVersion});
   };
   $('filler-profile-name').oninput=()=>renderFiller(currentState);
   $('filler-profile-create').onclick=()=>{

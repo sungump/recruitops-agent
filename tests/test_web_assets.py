@@ -470,5 +470,5 @@ def test_codex_stream_errors_never_fall_back_to_success_wording() -> None:
     assert 'data?.error?.message' in js
     assert 'payload?.error?.message' in js
     assert '"模型运行时返回了未说明的错误。"' in js
-    assert '"Agent 专用 DeepSeek API 余额不足，请充值或更换 Key。"' in js
+    assert '"模型 API 余额不足，请充值或更换 Key。"' in js
     assert ') || "已更新"' not in js

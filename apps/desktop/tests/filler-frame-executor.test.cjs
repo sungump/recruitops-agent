@@ -27,9 +27,11 @@ function nativeFrame(id, url = 'https://form.example.test/apply') {
 }
 
 function protocolFrame(id, url, parentId) {
+  const hashIndex = url.indexOf('#');
   return {
     id,
-    url,
+    url: hashIndex === -1 ? url : url.slice(0, hashIndex),
+    ...(hashIndex === -1 ? {} : { urlFragment: url.slice(hashIndex) }),
     securityOrigin: new URL(url).origin,
     loaderId: `loader-${id}-1`,
     ...(parentId ? { parentId } : {}),
@@ -45,7 +47,7 @@ function protocolTree(main, children = []) {
 }
 
 function frameFixture(childUrls = [], options = {}) {
-  const main = nativeFrame(1);
+  const main = nativeFrame(1, options.mainUrl);
   const children = childUrls.map((url, index) => {
     const child = nativeFrame(index + 2, url);
     child.parent = main;
@@ -228,6 +230,46 @@ test('child frame execution binds the unique URL and origin to its CDP frame id'
   assert.equal(world.params.frameId, 'cdp-child-1');
   assert.equal(evaluation.params.expression, 'child-scan');
   assert.equal(evaluation.params.contextId, 700);
+});
+
+test('top-frame execution retains the CDP URL fragment, including an empty hash', async () => {
+  for (const fragment of ['#/application/resume', '#', '#/%E7%AE%80%E5%8E%86?step=2']) {
+    const { wc, main, debug } = frameFixture([], { mainUrl: 'https://form.example.test/apply' + fragment });
+    await new FillerFrameExecutor().execute(wc, main, 'scan-hash-route');
+    assert.equal(debug.commands.find(item => item.method === 'Page.createIsolatedWorld').params.frameId, 'cdp-main');
+  }
+});
+
+test('frames sharing a document URL bind by the complete hash route rather than the first match', async () => {
+  const { wc, children, debug } = frameFixture([
+    'https://form.example.test/apply#/education',
+    'https://form.example.test/apply#/experience',
+  ], { mainUrl: 'https://form.example.test/apply#/resume' });
+  await new FillerFrameExecutor().execute(wc, children[1], 'scan-child-hash-route');
+  assert.equal(debug.commands.find(item => item.method === 'Page.createIsolatedWorld').params.frameId, 'cdp-child-2');
+});
+
+test('mismatched or duplicated complete hash routes fail before execution', async () => {
+  const missing = frameFixture([], { mainUrl: 'https://form.example.test/apply#/resume' });
+  const tree = protocolTree(missing.main);
+  tree.frameTree.frame.urlFragment = '#/other';
+  missing.setTree(tree);
+  const duplicate = frameFixture(['https://form.example.test/apply#/child', 'https://form.example.test/apply#/child']);
+  for (const [fixture, frame] of [[missing, missing.main], [duplicate, duplicate.children[0]]]) {
+    await assert.rejects(new FillerFrameExecutor().execute(fixture.wc, frame, 'must-not-run'), /frame_ambiguous/);
+    assert.equal(fixture.debug.commands.some(item => item.method === 'Runtime.evaluate'), false);
+  }
+});
+
+test('a malformed CDP URL fragment fails closed before execution', async () => {
+  for (const fragment of [null, 7]) {
+    const fixture = frameFixture();
+    const tree = protocolTree(fixture.main);
+    tree.frameTree.frame.urlFragment = fragment;
+    fixture.setTree(tree);
+    await assert.rejects(new FillerFrameExecutor().execute(fixture.wc, fixture.main, 'must-not-run'), /protocol_frame_incomplete/);
+    assert.equal(fixture.debug.commands.some(item => item.method === 'Runtime.evaluate'), false);
+  }
 });
 
 test('duplicate frame URLs are rejected before creating or evaluating a context', async () => {

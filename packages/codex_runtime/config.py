@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from packages.model_policy import official_base, official_model
+from packages.model_policy import normalize_connection
 
 
 class RestartPolicy(StrEnum):
@@ -62,6 +62,7 @@ class CodexHomeConfig(BaseModel):
     provider_id: str = Field(pattern=r"^[A-Za-z0-9_-]+$")
     provider_name: str = Field(default="DeepSeek", min_length=1)
     base_url: str = Field(min_length=1)
+    api_style: str = Field(default="anthropic", pattern=r"^(anthropic|openai)$")
     api_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
     reasoning_effort: str = Field(default="high", pattern=r"^(low|medium|high|xhigh|max)$")
     model_context_window: int = Field(default=1_000_000, ge=16_384)
@@ -88,8 +89,10 @@ class CodexHomeConfig(BaseModel):
         return names
 
     def render_toml(self) -> str:
-        official_base(self.base_url)
-        official_model(self.model)
+        style, _base = normalize_connection(self.base_url, self.model, self.api_style)
+        # DeepSeek names its top levels high/max; OpenAI Responses uses medium/high/xhigh.
+        effort = ({"medium": "high", "xhigh": "max"} if style == "anthropic"
+                  else {"max": "xhigh"}).get(self.reasoning_effort, self.reasoning_effort)
         if self.model_auto_compact_token_limit >= self.model_context_window:
             raise ValueError("auto-compaction limit must be smaller than the model context window")
         quote = lambda value: json.dumps(value, ensure_ascii=False)
@@ -99,7 +102,7 @@ class CodexHomeConfig(BaseModel):
             (
                 f"model = {quote(self.model)}",
                 f"model_provider = {quote(self.provider_id)}",
-                f"model_reasoning_effort = {quote({'medium': 'high', 'xhigh': 'max'}.get(self.reasoning_effort, self.reasoning_effort))}",
+                f"model_reasoning_effort = {quote(effort)}",
                 f"model_context_window = {self.model_context_window}",
                 f"model_auto_compact_token_limit = {self.model_auto_compact_token_limit}",
                 'approval_policy = "on-request"',

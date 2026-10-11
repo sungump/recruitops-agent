@@ -5,7 +5,7 @@ import ipaddress
 import re
 
 from packages.user_settings import DEFAULT_ON_CAPABILITY_FIELDS
-from packages.model_policy import official_base, official_model
+from packages.model_policy import normalize_connection
 
 from . import RuntimeFailure
 
@@ -17,15 +17,15 @@ CAPABILITY_FIELDS = (
 
 
 def saved_model_configured(settings):
-    """Official saved connection only; legacy third-party keys stay disabled."""
+    """DeepSeek or OpenAI-compatible saved connection; unsupported legacy keys stay disabled."""
     if not isinstance(settings, dict) or settings.get("model_api_style") not in ("anthropic", "openai"):
         return False
     if not all(isinstance(settings.get(name), str) and settings[name].strip()
                for name in ("llm_api_key", "model_name", "model_api_base_url")):
         return False
     try:
-        official_base(settings["model_api_base_url"])
-        official_model(settings["model_name"])
+        normalize_connection(settings["model_api_base_url"], settings["model_name"],
+                             settings["model_api_style"])
         return True
     except ValueError:
         return False

@@ -78,11 +78,12 @@ class VisionService:
         self, *, api_key: str, model: str = "deepseek-flash",
         endpoint: str = "https://api.deepseek.com/chat/completions",
         timeout: float = 45.0, max_bytes: int = 6 * 1024 * 1024,
-        transport: Transport | None = None,
+        transport: Transport | None = None, api_style: str = "anthropic",
     ) -> None:
         self.api_key = api_key
         self.model = model
-        self.endpoint = _validated_endpoint(endpoint)
+        self.api_style = api_style
+        self.endpoint = _validated_endpoint(endpoint, api_style)
         self.timeout = max(1, min(timeout, 90))
         self.max_bytes = max_bytes
         self.transport = transport or _default_transport
@@ -91,7 +92,9 @@ class VisionService:
         digest = image_digest(data_url, self.max_bytes)
         if not self.api_key.strip():
             raise VisionError("vision_not_configured")
-        if self.model not in {"deepseek-flash", "deepseek-v4-flash-vision-exp"}:
+        # A compatible service's model must accept image input; the provider reports otherwise.
+        if (self.api_style != "openai"
+                and self.model not in {"deepseek-flash", "deepseek-v4-flash-vision-exp"}):
             raise VisionError("vision_model_unsupported")
         payload = {
             "model": self.model,
@@ -101,9 +104,12 @@ class VisionService:
             ]}],
             "max_tokens": 1600,
             "stream": False,
-            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
         }
+        if self.api_style != "openai":
+            payload["thinking"] = {"type": "disabled"}
+        if "://api.openai.com/" in self.endpoint:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
         try:
             raw = self.transport(self.endpoint, {
                 "Authorization": f"Bearer {self.api_key}",

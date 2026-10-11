@@ -30,7 +30,7 @@ from packages.candidate_profile.loader import CandidateProfileError, load_candid
 from packages.domain.models import ApplicationStage
 from packages.storage import ApplicationSnapshot
 from packages.user_settings import CONFIG_FIELDS, SECRET_FIELDS, LEGACY_MODEL_FIELDS, settings_dir
-from packages.model_policy import official_base, official_model
+from packages.model_policy import endpoints, is_deepseek_host, normalize_connection
 
 router = APIRouter(prefix="/api/local-ui/configuration", tags=["configuration"])
 
@@ -60,8 +60,8 @@ MATCHING_FIELDS = (
 )
 
 
-def _valid_api_base(value: str) -> str:
-    return official_base(value)
+PROVIDER_STYLES = {"deepseek": "anthropic", "openai_compatible": "openai"}
+PROVIDER_FOR_STYLE = {style: provider for provider, style in PROVIDER_STYLES.items()}
 
 
 def _load_configuration_profile(settings: Settings):
@@ -207,16 +207,29 @@ class ModelConnectionEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=80)
-    provider: str = Field(pattern=r"^deepseek$")
-    api_style: str = Field(default="anthropic", pattern=r"^anthropic$")
+    provider: str = Field(pattern=r"^(deepseek|openai_compatible)$")
+    api_style: str = Field(default="anthropic", pattern=r"^(anthropic|openai)$")
     base_url: str = Field(min_length=1, max_length=2048)
     model: str = Field(min_length=1, max_length=200)
     api_key: str = Field(default="", max_length=4096)
 
 
-def _validate_model_provider(provider: str, api_style: str) -> None:
-    if provider != "deepseek" or api_style != "anthropic":
-        raise HTTPException(422, "目前仅支持 DeepSeek 官方接口")
+def _validate_model_provider(provider: str, api_style: str, base_url: str, model: str) -> str:
+    """Check a connection before any network call; return its normalized base URL."""
+    if PROVIDER_STYLES.get(provider) != api_style:
+        raise HTTPException(422, "接口类型与协议不匹配")
+    if provider == "openai_compatible" and is_deepseek_host(base_url):
+        raise HTTPException(422, "DeepSeek 官方地址请选择“DeepSeek 官方”接口类型")
+    if provider == "deepseek" and not is_deepseek_host(base_url):
+        raise HTTPException(422, "其他服务商请选择“OpenAI 兼容”接口类型")
+    try:
+        _style, base = normalize_connection(base_url, model, api_style)
+    except ValueError:
+        if provider == "deepseek":
+            raise HTTPException(422, "请使用 DeepSeek 官方地址和支持的模型") from None
+        raise HTTPException(422, "服务地址须为 HTTPS（本机服务可用 http://127.0.0.1），"
+                                 "模型名只能包含字母、数字和 . _ - : / @ +") from None
+    return base
 
 
 def _connection_path(settings: Settings):
@@ -225,9 +238,9 @@ def _connection_path(settings: Settings):
 
 def _fallback_connection(settings: Settings) -> dict:
     return {
-        "id": "deepseek-primary",
+        "id": "deepseek-primary" if settings.model_api_style == "anthropic" else "compatible-primary",
         "name": settings.model_provider_name,
-        "provider": "deepseek",
+        "provider": PROVIDER_FOR_STYLE[settings.model_api_style],
         "api_style": settings.model_api_style,
         "base_url": settings.model_api_base_url,
         "model": settings.model_name,
@@ -249,11 +262,13 @@ def _stored_connections(settings: Settings) -> tuple[list[dict], str]:
                         if not isinstance(row, Mapping) or not isinstance(row.get("id"), str):
                             continue
                         try:
-                            base = official_base(str(row.get("base_url") or ""))
-                            official_model(str(row.get("model") or ""))
+                            style, base = normalize_connection(
+                                str(row.get("base_url") or ""), str(row.get("model") or ""),
+                                str(row.get("api_style") or "anthropic"))
                         except ValueError:
                             continue
-                        clean_rows.append({**row, "base_url": base, "provider": "deepseek", "api_style": "anthropic"})
+                        clean_rows.append({**row, "base_url": base, "api_style": style,
+                                           "provider": PROVIDER_FOR_STYLE[style]})
                 if clean_rows and isinstance(active, str) and any(
                     row["id"] == active for row in clean_rows
                 ):
@@ -436,12 +451,8 @@ def save_configuration(body: ConfigEdit):
             if not MODEL_ID_RE.fullmatch(connection.id) or connection.id in seen:
                 raise HTTPException(422, "模型连接标识无效或重复")
             seen.add(connection.id)
-            _validate_model_provider(connection.provider, connection.api_style)
-            try:
-                base_url = _valid_api_base(connection.base_url)
-                official_model(connection.model)
-            except ValueError:
-                raise HTTPException(422, "请使用 DeepSeek 官方地址和支持的模型") from None
+            base_url = _validate_model_provider(connection.provider, connection.api_style,
+                                                connection.base_url, connection.model)
             row = connection.model_dump()
             row["base_url"] = base_url
             row["api_key"] = connection.api_key or existing_keys.get(connection.id, "")
@@ -493,18 +504,16 @@ def save_configuration(body: ConfigEdit):
         # both disabled without affecting the rest of onboarding.
         overrides["mail_enabled"] = mail_configured
         overrides["mail_sync_on_startup"] = mail_configured
-    if "model_api_base_url" in overrides:
+    if {"model_api_base_url", "model_name", "model_api_style"} & set(overrides):
         try:
-            overrides["model_api_base_url"] = _valid_api_base(str(overrides["model_api_base_url"]))
+            style, overrides["model_api_base_url"] = normalize_connection(
+                str(overrides.get("model_api_base_url", settings.model_api_base_url)),
+                str(overrides.get("model_name", settings.model_name)),
+                str(overrides.get("model_api_style", settings.model_api_style)))
         except ValueError:
-            raise HTTPException(422, "目前仅支持 https://api.deepseek.com 官方地址") from None
-    if "model_name" in overrides:
-        try:
-            official_model(str(overrides["model_name"]))
-        except ValueError:
-            raise HTTPException(422, "请选择 DeepSeek 官方支持的模型") from None
-    if overrides.get("model_api_style", "anthropic") != "anthropic":
-        raise HTTPException(422, "目前仅支持 DeepSeek 官方接口")
+            raise HTTPException(422, "请使用 DeepSeek 官方地址或有效的 OpenAI 兼容服务地址与模型名") from None
+        if "model_api_style" in overrides:
+            overrides["model_api_style"] = style
     for key in SECRET_FIELDS:
         if key == "llm_api_key" and saved_connections is not None:
             continue
@@ -561,8 +570,8 @@ def save_configuration(body: ConfigEdit):
 class ModelConnectionTest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     id: str = Field(min_length=1, max_length=64)
-    provider: str = Field(pattern=r"^deepseek$")
-    api_style: str = Field(default="anthropic", pattern=r"^anthropic$")
+    provider: str = Field(pattern=r"^(deepseek|openai_compatible)$")
+    api_style: str = Field(default="anthropic", pattern=r"^(anthropic|openai)$")
     base_url: str = Field(min_length=1, max_length=2048)
     model: str = Field(min_length=1, max_length=200)
     api_key: str = Field(default="", max_length=4096)
@@ -573,12 +582,7 @@ def test_model_connection(body: ModelConnectionTest):
     settings = require_owner()
     from packages.matching.client import DeepSeekClientError, _default_transport
 
-    _validate_model_provider(body.provider, body.api_style)
-    try:
-        base = _valid_api_base(body.base_url)
-        official_model(body.model)
-    except ValueError:
-        raise HTTPException(422, "请选择 DeepSeek 官方地址和支持的模型") from None
+    base = _validate_model_provider(body.provider, body.api_style, body.base_url, body.model)
     stored, _ = _stored_connections(settings)
     stored_key = next(
         (str(row.get("api_key") or "") for row in stored if row.get("id") == body.id),
@@ -587,8 +591,9 @@ def test_model_connection(body: ModelConnectionTest):
     api_key = body.api_key or stored_key
     if not api_key:
         raise HTTPException(422, "请填写 API 密钥")
+    wire = endpoints(base, body.api_style)
     try:
-        endpoint = base + "/anthropic/v1/messages"
+        endpoint = wire["text"]
         started = monotonic()
         response = _build_structured_completion(
             api_key=api_key,
@@ -609,16 +614,24 @@ def test_model_connection(body: ModelConnectionTest):
         parsed = json.loads(response.content)
         if parsed != {"status": "ok"}:
             raise ValueError("unexpected structured response")
-        # The workbench assistant uses a Responses-compatible Codex provider too.
-        assistant_response = _default_transport(
-            base + "/responses",
-            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            {"model": body.model, "input": "Reply with OK only.", "max_output_tokens": 128,
-             "reasoning": {"effort": "none"}},
-            20,
-        )
-        if (not isinstance(assistant_response.get("id"), str)
-                or assistant_response.get("status") != "completed"):
+        # The workbench assistant runs on Codex, which only speaks the Responses API.
+        probe = {"model": body.model, "input": "Reply with OK only.", "max_output_tokens": 128}
+        if body.api_style == "anthropic":
+            probe["reasoning"] = {"effort": "none"}
+        try:
+            assistant_response = _default_transport(
+                wire["responses"],
+                {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                probe,
+                20,
+            )
+            assistant_ready = (isinstance(assistant_response.get("id"), str)
+                               and assistant_response.get("status") == "completed")
+        except DeepSeekClientError:
+            if body.api_style == "anthropic":
+                raise
+            assistant_ready = False
+        if not assistant_ready and body.api_style == "anthropic":
             raise ValueError("responses endpoint is incompatible")
     except DeepSeekClientError as exc:
         labels = {
@@ -639,7 +652,9 @@ def test_model_connection(body: ModelConnectionTest):
         "model": response.model,
         "latency_ms": round((monotonic() - started) * 1000),
         "structured_output": True,
-        "assistant_runtime": True,
+        "assistant_runtime": assistant_ready,
+        "message": "" if assistant_ready else (
+            "解析、评分、邮件可用；该服务不支持 Responses 接口，求职助理与定时任务无法使用。"),
     }
 
 

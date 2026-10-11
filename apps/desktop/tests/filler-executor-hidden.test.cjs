@@ -359,3 +359,56 @@ test('hidden Electron selects Phoenix dropdown by exact text and rejects ambiguo
   assert.deepEqual(await page.locator('.phoenix-selectList__listItem').evaluateAll(options => options.map(option => Number(option.dataset.clicks))), [0]);
   assert.equal(await page.locator('.phoenix-select__placeHolder--show').count(), 1);
 });
+
+
+test('hidden Electron scans hash routes and fills only selected fields without submitting', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'filler-hash-route-'));
+  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  const application = await _electron.launch({ args: [path.join(__dirname, 'filler-executor-fixture.cjs'), directory], env });
+  t.after(async () => { await application.close(); fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5 }); });
+  const page = await application.firstWindow();
+  await page.waitForURL('http://127.0.0.1:*/form');
+  await page.goto(page.url() + '#/application/resume');
+  await page.setContent('<iframe src="/form#/education"></iframe>');
+  await page.locator('iframe').contentFrame().locator('body').waitFor();
+  const childPage = page.frames().find(frame => frame.url().endsWith('#/education'));
+  assert.ok(childPage);
+  await childPage.evaluate(() => {
+    document.body.innerHTML = '<form><label>姓名<input name="fullName"></label><label>邮箱<input name="email"></label><input type="file" id="resume"><button type="submit">提交申请</button></form>';
+    globalThis.fixtureSubmissions = 0;
+    document.querySelector('form').addEventListener('submit', event => { event.preventDefault(); globalThis.fixtureSubmissions++; });
+  });
+  const scan = await application.evaluate(async ({ BrowserWindow }) => {
+    const wc = BrowserWindow.getAllWindows()[0].webContents;
+    const service = new globalThis.FillerService(globalThis.fillerAdapter, () => {}, 10000, globalThis.fillerExecutor);
+    service.attach(wc);
+    service.setProfile({ basic: { fullName: 'Synthetic Candidate', email: 'candidate@example.test' } }, 1);
+    globalThis.hashRouteService = service;
+    await service.scan(wc, 'a'.repeat(32));
+    return service.snapshot(wc);
+  });
+  assert.equal(scan.scanState, 'complete', scan.message);
+  assert.equal(scan.scanSummary.framesScanned, 2);
+  assert.equal(scan.scanSummary.framesFailed, 0);
+  assert.equal(scan.scanSummary.matched, 2);
+  const selected = scan.fields.find(field => field.label.includes('姓名'));
+  assert.ok(selected);
+  const filled = await application.evaluate(async ({ BrowserWindow }, selection) => {
+    const wc = BrowserWindow.getAllWindows()[0].webContents;
+    await globalThis.hashRouteService.fill(wc, selection.scanId, [selection.fieldId]);
+    return globalThis.hashRouteService.snapshot(wc);
+  }, { scanId: scan.scanId, fieldId: selected.fieldId });
+  assert.equal(filled.results.length, 1);
+  assert.equal(filled.results[0].status, 'success');
+  assert.equal(await childPage.locator('[name=fullName]').inputValue(), 'Synthetic Candidate');
+  assert.equal(await childPage.locator('[name=email]').inputValue(), '');
+  assert.equal(await childPage.evaluate(() => globalThis.fixtureSubmissions), 0);
+  const file = path.join(directory, 'synthetic.pdf');
+  fs.writeFileSync(file, '%PDF-1.4\nSynthetic fixture only\n');
+  await application.evaluate(async ({ BrowserWindow }, file) => {
+    const wc = BrowserWindow.getAllWindows()[0].webContents;
+    const frame = wc.mainFrame.frames.find(frame => frame.url.endsWith('#/education'));
+    await globalThis.fillerExecutor.assignFile(wc, frame, 'document.querySelector("#resume")', file, () => true);
+  }, file);
+  assert.equal(await childPage.locator('#resume').evaluate(element => element.files[0].name), 'synthetic.pdf');
+});

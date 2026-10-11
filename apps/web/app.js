@@ -1797,6 +1797,8 @@
             element("span", "application-result", latestHistory.result || fallbackResult),
             element("span", "application-updated", `更新于 ${compactDate(application.updated_at)}`),
           );
+          const resumeUsed = historyItems.find((item) => typeof item?.resume === "string" && item.resume)?.resume;
+          if (resumeUsed) status.append(element("span", "application-updated", `简历：${resumeUsed}`));
 
           const actions = element("div", "application-card-actions");
           const links = element("div", "application-card-links");
@@ -4090,7 +4092,7 @@
     const friendlyRuntimeError = (value) => {
       const raw = localizeCodexRuntimeMessage(text(value, "模型运行时返回了未说明的错误。"));
       if (/\b402\b.*insufficient balance|insufficient balance.*\b402\b/i.test(raw)) {
-        return "Agent 专用 DeepSeek API 余额不足，请充值或更换 Key。";
+        return "模型 API 余额不足，请充值或更换 Key。";
       }
       return raw;
     };

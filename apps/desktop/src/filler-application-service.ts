@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 export type ApplicationPage = { instanceId: string; tabId: number; generation: number; url: string };
 export type Registration = { company: string; title: string; record_url: string;
-  application_id?: string; job_id?: string; city?: string; progress_url_confirmed?: boolean };
+  application_id?: string; job_id?: string; city?: string; resume_name?: string; progress_url_confirmed?: boolean };
 export type PendingRegistration = { id: string; instanceId: string; createdAt: string;
   attempts: number; error: string; registration: Registration; reconcile?: boolean };
 export interface ApplicationQueueStore {
@@ -31,11 +31,13 @@ function registration(value: Registration): Registration {
   if (!company || company.length > 255 || !title || title.length > 512 ||
       (value.application_id !== undefined && (typeof value.application_id !== 'string' || !value.application_id || value.application_id.length > 255)) ||
       (jobId !== undefined && (!jobId || jobId.length > 255)) ||
-      (value.city !== undefined && (typeof value.city !== 'string' || value.city.length > 255))) throw new Error('invalid_registration');
+      (value.city !== undefined && (typeof value.city !== 'string' || value.city.length > 255)) ||
+      (value.resume_name !== undefined && (typeof value.resume_name !== 'string' || value.resume_name.length > 80))) throw new Error('invalid_registration');
   return { company, title, record_url: progressUrl(value.record_url, value.progress_url_confirmed === true),
     ...(value.application_id ? { application_id: value.application_id } : {}),
     ...(jobId ? { job_id: jobId } : {}),
-    city: value.city || '', progress_url_confirmed: value.progress_url_confirmed === true };
+    city: value.city || '', ...(value.resume_name?.trim() ? { resume_name: value.resume_name.trim() } : {}),
+    progress_url_confirmed: value.progress_url_confirmed === true };
 }
 
 export function companyNameFromPageTitle(value: unknown): string {

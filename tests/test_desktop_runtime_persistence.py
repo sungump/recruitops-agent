@@ -401,5 +401,9 @@ def test_assistant_saved_model_invalid_is_disabled(tmp_path, monkeypatch, field,
 
 def test_saved_model_helper_strict_types_and_local_endpoint():
     assert not saved_model_configured([])
-    assert not saved_model_configured({"llm_api_key": "synthetic", "model_name": "deepseek-flash",
+    # A local OpenAI-compatible server (Ollama, vLLM) is a supported connection.
+    assert saved_model_configured({"llm_api_key": "synthetic", "model_name": "qwen2.5:7b",
                                   "model_api_style": "openai", "model_api_base_url": "http://127.0.0.1:55003/v1"})
+    # Plain HTTP to a remote host is not.
+    assert not saved_model_configured({"llm_api_key": "synthetic", "model_name": "gpt-4.1-mini",
+                                  "model_api_style": "openai", "model_api_base_url": "http://gateway.example/v1"})

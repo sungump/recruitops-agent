@@ -49,7 +49,7 @@ def stored_detail_retry_required(job: Any) -> bool:
 
 def _literal_pattern(value: str) -> re.Pattern[str]:
     """Match a configured keyword without allowing an ASCII word prefix/suffix."""
-    escaped = re.escape(value).replace(r"\ ", r"\s+")
+    escaped = re.escape(value).replace(r"\ ", r"\s*")
     boundary = r"(?<![A-Za-z0-9_])" if value[:1].isascii() and value[:1].isalpha() else ""
     end_boundary = r"(?![A-Za-z0-9_])" if value[-1:].isascii() and value[-1:].isalnum() else ""
     return re.compile(f"{boundary}{escaped}{end_boundary}", re.IGNORECASE)

@@ -842,7 +842,7 @@ class MatchingService:
                      if error_code == "model_output_invalid" else "分析失败，待重试"),
             recommendation="未评估",
             error_code=error_code,
-            error_message=f"DeepSeek matching failed: {error_code}",
+            error_message=f"Model matching failed: {error_code}",
             matched_directions=screening.matched_directions,
             primary_match_direction=screening.primary_match_direction,
         )

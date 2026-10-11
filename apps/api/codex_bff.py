@@ -556,6 +556,7 @@ def get_codex_supervisor() -> CodexSupervisor:
         provider_id=settings.codex_model_provider_id,
         provider_name=getattr(settings, "model_provider_name", "DeepSeek"),
         base_url=settings.codex_model_base_url,
+        api_style=getattr(settings, "model_api_style", "anthropic"),
         api_key_env=settings.codex_model_api_key_env,
         reasoning_effort=settings.codex_reasoning_effort,
         model_context_window=getattr(settings, "codex_model_context_window", 1_000_000),

@@ -57,6 +57,7 @@ export type Command = { action: 'home' | 'back' | 'forward' | 'reload' | 'hide' 
   { action: 'filler-profile-select'; profileId: string; expectedVersion: number } |
   { action: 'filler-profile-rename'; profileId: string; name: string; expectedVersion: number } |
   { action: 'filler-profile-delete'; profileId: string; expectedVersion: number } |
+  { action: 'filler-resume-import'; expectedVersion: number } |
   { action: 'filler-custom-save'; question: string; answer: string; scope: 'site' | 'global'; fieldId?: string; answerId?: string } |
   { action: 'filler-custom-delete'; answerId: string } |
   { action: 'filler-application-save'; company: string; title: string; recordUrl: string; city?: string } |
@@ -108,6 +109,9 @@ export function parseCommand(raw: unknown): Command {
   if (action === 'filler-profile-delete' && exactKeys(r,['action','profileId','expectedVersion']) && typeof r.profileId === 'string' && PROFILE_ID.test(r.profileId) &&
       Number.isSafeInteger(r.expectedVersion) && Number(r.expectedVersion) >= 0)
     return { action, profileId:r.profileId, expectedVersion:Number(r.expectedVersion) };
+  if (action === 'filler-resume-import' && exactKeys(r,['action','expectedVersion']) &&
+      Number.isSafeInteger(r.expectedVersion) && Number(r.expectedVersion) >= 0)
+    return { action, expectedVersion:Number(r.expectedVersion) };
   if (action === 'filler-custom-save' && exactKeys(r, ['action','question','answer','scope','fieldId','answerId']) &&
       boundedText(r.question,500) && boundedText(r.answer,4000) && (r.scope === 'site' || r.scope === 'global') &&
       (r.fieldId === undefined || boundedText(r.fieldId,256)) && (r.answerId === undefined || boundedText(r.answerId,64)))

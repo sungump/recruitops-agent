@@ -11,7 +11,9 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from packages.user_settings import DEFAULT_ON_CAPABILITY_FIELDS
-from packages.model_policy import DEEPSEEK_BASE, official_base, official_model
+from packages.model_policy import (
+    DEEPSEEK_BASE, OPENAI_COMPATIBLE_PROVIDER_ID, endpoints, normalize_connection,
+)
 
 UNIFIED_MODEL = "deepseek-flash"
 DESKTOP_CAPABILITY_FIELDS = (
@@ -133,7 +135,7 @@ class Settings(BaseSettings):
     codex_startup_timeout_seconds: float = 15.0
     codex_model_provider_id: str = "deepseek"
     model_provider_name: str = "DeepSeek"
-    model_api_style: Literal["anthropic"] = "anthropic"
+    model_api_style: Literal["anthropic", "openai"] = "anthropic"
     model_connection_migration_required: bool = False
     model_name: str = UNIFIED_MODEL
     model_api_base_url: str | None = None
@@ -218,31 +220,39 @@ class Settings(BaseSettings):
             return value
         value = dict(value)
         try:
-            official_base(value.get("model_api_base_url") or value.get("codex_model_base_url") or DEEPSEEK_BASE)
-            official_model(value.get("model_name", UNIFIED_MODEL))
-            if value.get("model_api_style", "anthropic") not in ("anthropic", "openai"):
-                raise ValueError("unsupported legacy protocol")
+            value["model_api_style"], _base = normalize_connection(
+                value.get("model_api_base_url") or value.get("codex_model_base_url") or DEEPSEEK_BASE,
+                value.get("model_name", UNIFIED_MODEL),
+                value.get("model_api_style", "anthropic"),
+            )
         except (ValueError, TypeError, AttributeError):
-            # Preserve the saved file, but never send another provider's secret
-            # to DeepSeek when opening a legacy installation.
+            # Preserve the saved file, but never send a secret to a host other
+            # than the one it was saved for when opening a legacy installation.
             value.update(model_api_base_url=DEEPSEEK_BASE, codex_model_base_url=DEEPSEEK_BASE,
                          model_name=UNIFIED_MODEL, llm_api_key="", llm_enabled=False,
                          job_analysis_enabled=False, codex_runtime_enabled=False,
-                         model_connection_migration_required=True)
-        value["model_api_style"] = "anthropic"
+                         model_connection_migration_required=True, model_api_style="anthropic")
         return value
 
     @model_validator(mode="after")
     def unified_flash_model(self):
-        self.model_provider_name = "DeepSeek"
-        self.codex_model_provider_id = "deepseek"
+        self.model_api_style, base = normalize_connection(
+            self.model_api_base_url or self.codex_model_base_url, self.model_name,
+            self.model_api_style)
+        if self.model_api_style == "openai":
+            self.model_provider_name = self.model_provider_name.strip() or "OpenAI 兼容"
+            if self.model_provider_name == "DeepSeek":
+                self.model_provider_name = "OpenAI 兼容"
+            self.codex_model_provider_id = OPENAI_COMPATIBLE_PROVIDER_ID
+        else:
+            self.model_provider_name = "DeepSeek"
+            self.codex_model_provider_id = "deepseek"
         self.codex_model_api_key_env = "RECRUITOPS_LLM_API_KEY"
-        base = official_base(self.model_api_base_url or self.codex_model_base_url)
-        official_model(self.model_name)
         self.model_api_base_url = base
         self.codex_model_base_url = base
-        self.llm_endpoint = base + "/anthropic/v1/messages"
-        self.vision_endpoint = base + "/chat/completions"
+        wire = endpoints(base, self.model_api_style)
+        self.llm_endpoint = wire["text"]
+        self.vision_endpoint = wire["vision"]
         self.llm_model = self.codex_model = self.vision_model = self.model_name
         from packages.desktop_runtime.capabilities import saved_mail_configured
 
@@ -294,8 +304,9 @@ def get_settings() -> Settings:
         # provider. Do not keep its migration flag and erase the new key later.
         if overrides.get("model_api_base_url") and overrides.get("llm_api_key"):
             try:
-                official_base(overrides["model_api_base_url"])
-                official_model(overrides.get("model_name", UNIFIED_MODEL))
+                normalize_connection(overrides["model_api_base_url"],
+                                     overrides.get("model_name", UNIFIED_MODEL),
+                                     overrides.get("model_api_style", "anthropic"))
                 values["model_connection_migration_required"] = False
             except (ValueError, TypeError, AttributeError):
                 pass

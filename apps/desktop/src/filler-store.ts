@@ -18,8 +18,10 @@ type State = { schema: 3; instanceId: string; revision: number; mode: FillerMode
 export interface FillerSnapshot {
   schema: 3; revision: number; mode: FillerMode; profile: FillerProfile;
   settings: FillerProfile; attachment: FillerAttachment | null;
-  activeProfileId: string; activeProfileName: string; personalProfiles: { id: string; name: string }[];
+  activeProfileId: string; activeProfileName: string;
+  personalProfiles: { id: string; name: string; attachmentName: string | null }[];
 }
+export interface ResumeImportResult { created: string[]; updated: string[]; activeProfileName: string }
 export class FillerStoreError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'FillerStoreError'; }
 }
@@ -28,6 +30,7 @@ const MAX_ATTACHMENT = 20 * 1024 * 1024;
 const MAX_PROTECTED_ATTACHMENT = MAX_ATTACHMENT * 2 + MAX_JSON;
 const MAX_STATE = 8 * 1024 * 1024;
 const MAX_PERSONAL_PROFILES = 50;
+const MAX_RESUME_IMPORT = 20;
 const ID = /^[0-9a-f-]{36}$/;
 const PROFILE_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -46,6 +49,13 @@ function profileName(value: unknown): string {
   return name;
 }
 const profileNameKey = (value: string) => value.normalize('NFKC').toLowerCase();
+/** Profile name for an imported resume file: its file name without extension. */
+function resumeProfileName(file: string): string {
+  const stem = path.basename(file, path.extname(file)).normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  let name = Array.from(stem || '简历').slice(0, 80).join('');
+  while (Buffer.byteLength(name) > 240) name = Array.from(name).slice(0, -1).join('');
+  return profileName(name);
+}
 
 function checkedJson(value: unknown): FillerProfile {
   let nodes = 0;
@@ -258,7 +268,19 @@ export class FillerStore {
     const slot = this.activeSlot();
     return clone({ schema: 3, revision: this.state.revision, mode: this.state.mode, ...slot,
       activeProfileId: this.state.activeProfileId, activeProfileName: this.personalProfile(this.state).name,
-      personalProfiles: this.state.personalProfiles.map(({ id, name }) => ({ id, name })) });
+      personalProfiles: this.state.personalProfiles.map(({ id, name, slot }) => ({ id, name, attachmentName: slot.attachment?.name ?? null })) });
+  }
+  /** One setting shared by every resume profile (e.g. the pending registration queue). */
+  sharedSetting(key: string): unknown {
+    const owners = [this.personalProfile(this.state).slot, ...this.state.personalProfiles.map(item => item.slot), this.state.demo];
+    return owners.find(slot => Object.hasOwn(slot.settings, key))?.settings[key];
+  }
+  saveSharedSetting(key: string, value: unknown) {
+    const validated = checkedJson({ [key]: value })[key];
+    return this.change(state => {
+      for (const slot of [...state.personalProfiles.map(item => item.slot), state.demo]) delete slot.settings[key];
+      this.personalProfile(state).slot.settings[key] = validated;
+    });
   }
   saveProfile(profile: unknown, expectedRevision = this.state.revision) {
     this.checkRevision(expectedRevision);
@@ -318,6 +340,60 @@ export class FillerStore {
     if (mode !== 'personal' && mode !== 'demo') fail('filler_mode_invalid');
     return mode === this.state.mode ? this.snapshot() : this.change(state => { state.mode = mode; });
   }
+  /** Explicit main-process multi-select result only. Each file becomes (or refreshes)
+   * the resume profile named after it, seeded from the active profile's details. */
+  importResumeFiles(selectedPaths: string[], expectedRevision: number): ResumeImportResult {
+    this.checkRevision(expectedRevision);
+    if (!Array.isArray(selectedPaths) || selectedPaths.length < 1 || selectedPaths.length > MAX_RESUME_IMPORT) fail('filler_resume_import_invalid');
+    const prepared = selectedPaths.map(selected => {
+      if (typeof selected !== 'string' || !path.isAbsolute(selected)) fail('filler_attachment_invalid');
+      const bytes = this.read(selected, MAX_ATTACHMENT);
+      const attachment = this.validateAttachment({ id: randomUUID(), name: path.basename(selected),
+        type: path.extname(selected).slice(1).toLowerCase(), size: bytes.length, sha256: hash(bytes) })!;
+      return { name: resumeProfileName(selected), attachment, bytes };
+    });
+    const keys = prepared.map(item => profileNameKey(item.name));
+    if (new Set(keys).size !== keys.length) fail('filler_resume_import_duplicate_name');
+    const existing = new Map(this.state.personalProfiles.map(item => [profileNameKey(item.name), item.id]));
+    const added = keys.filter(key => !existing.has(key)).length;
+    if (this.state.personalProfiles.length + added > MAX_PERSONAL_PROFILES) fail('filler_profile_limit');
+    const template = this.personalProfile(this.state).slot;
+    const answers = template.settings.customAnswers;
+    const files: string[] = [];
+    for (const item of prepared) this.pendingAttachments.add(item.attachment.id);
+    try {
+      for (const item of prepared) {
+        const encrypted = this.protect(item.bytes);
+        if (encrypted.length > MAX_PROTECTED_ATTACHMENT) fail('filler_attachment_size');
+        const file = path.join(this.attachments, item.attachment.id + '.bin');
+        files.push(file);
+        this.atomic(file, encrypted);
+      }
+      const result: ResumeImportResult = { created: [], updated: [], activeProfileName: prepared[0].name };
+      this.change(state => {
+        let first = '';
+        for (const item of prepared) {
+          const id = existing.get(profileNameKey(item.name));
+          if (id) {
+            this.personalProfile(state, id).slot.attachment = item.attachment;
+            result.updated.push(item.name);
+            first ||= id;
+          } else {
+            const created = { id: randomUUID(), name: item.name, slot: { profile: clone(template.profile),
+              settings: answers === undefined ? {} : { customAnswers: clone(answers) }, attachment: item.attachment } };
+            state.personalProfiles.push(created);
+            result.created.push(item.name);
+            first ||= created.id;
+          }
+        }
+        state.activeProfileId = first; state.mode = 'personal';
+      });
+      return result;
+    } catch (error) {
+      for (const file of files) if (fs.existsSync(io(file))) fs.unlinkSync(io(file));
+      throw error;
+    } finally { for (const item of prepared) this.pendingAttachments.delete(item.attachment.id); }
+  }
   /** Explicit main-process file-picker result only; never forward renderer paths. */
   replaceAttachment(selectedPath: string) {
     if (this.state.mode !== 'personal') fail('filler_demo_attachment_forbidden');
@@ -327,7 +403,7 @@ export class FillerStore {
       type: path.extname(selectedPath).slice(1).toLowerCase(), size: bytes.length, sha256: hash(bytes) })!;
     const file = path.join(this.attachments, attachment.id + '.bin');
     // Retain the new encrypted blob while the metadata commit performs cleanup.
-    this.pendingAttachment = attachment.id;
+    this.pendingAttachments.add(attachment.id);
     try {
       const encrypted = this.protect(bytes);
       if (encrypted.length > MAX_PROTECTED_ATTACHMENT) fail('filler_attachment_size');
@@ -337,7 +413,7 @@ export class FillerStore {
     } catch (error) {
       if (fs.existsSync(io(file))) fs.unlinkSync(io(file));
       throw error;
-    } finally { this.pendingAttachment = undefined; }
+    } finally { this.pendingAttachments.delete(attachment.id); }
   }
   clearAttachment() {
     return this.change(state => { this.activeSlot(state).attachment = null; });
@@ -384,10 +460,10 @@ export class FillerStore {
       fs.unlinkSync(io(file));
     }
   }
-  private pendingAttachment?: string;
+  private readonly pendingAttachments = new Set<string>();
   private collectAttachments() {
     const keep = new Set<string>(this.state.personalProfiles.map(item => item.slot.attachment?.id).filter((id): id is string => !!id));
-    if (this.pendingAttachment) keep.add(this.pendingAttachment);
+    for (const id of this.pendingAttachments) keep.add(id);
     if (fs.existsSync(io(this.backupFile))) {
       for (const item of this.decode(this.read(this.backupFile, MAX_STATE)).personalProfiles) {
         if (item.slot.attachment) keep.add(item.slot.attachment.id);

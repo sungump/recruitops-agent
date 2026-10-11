@@ -128,7 +128,7 @@ def browser_vision_service() -> VisionService:
     return VisionService(
         api_key=settings.llm_api_key, model=settings.vision_model,
         endpoint=settings.vision_endpoint, timeout=settings.vision_timeout_seconds,
-        max_bytes=settings.vision_max_image_bytes,
+        max_bytes=settings.vision_max_image_bytes, api_style=settings.model_api_style,
     )
 
 

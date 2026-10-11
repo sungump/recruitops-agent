@@ -13,8 +13,19 @@
   const CAPABILITY_FIELDS = ["vision_enabled"];
   const split = (value) => value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const MODEL_PRESETS = {
-    deepseek: {label: "DeepSeek", api_style: "anthropic", base_url: "https://api.deepseek.com", model: "deepseek-flash"},
+    deepseek: {label: "DeepSeek 官方", api_style: "anthropic", base_url: "https://api.deepseek.com", model: "deepseek-flash"},
+    openai_compatible: {label: "OpenAI 兼容", api_style: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini"},
   };
+  const COMPATIBLE_BASES = [
+    ["https://api.openai.com/v1", "OpenAI"],
+    ["https://api.siliconflow.cn/v1", "硅基流动"],
+    ["https://dashscope.aliyuncs.com/compatible-mode/v1", "阿里云百炼"],
+    ["https://api.moonshot.cn/v1", "Moonshot / Kimi"],
+    ["https://open.bigmodel.cn/api/paas/v4", "智谱"],
+    ["https://openrouter.ai/api/v1", "OpenRouter"],
+    ["http://127.0.0.1:11434/v1", "本机 Ollama"],
+  ];
+  const COMPATIBLE_MODELS = ["gpt-4.1-mini", "gpt-4.1", "gpt-5-mini", "Qwen/Qwen3-32B", "qwen-plus", "kimi-k2-turbo-preview", "glm-4.6"];
   const degreeOption = (value) => {
     const text = String(value || "");
     if (text.includes("博")) return "博士";
@@ -135,28 +146,41 @@
         const option = document.createElement("option"); option.value = value; option.textContent = preset.label;
         provider.append(option);
       }
-      provider.value = "deepseek"; provider.disabled = true;
-      const providerHint = document.createElement("small"); providerHint.textContent = "仅支持 DeepSeek 官方服务，助理、解析与评分统一使用。";
+      provider.value = MODEL_PRESETS[connection.provider] ? connection.provider : "deepseek";
+      const providerHint = document.createElement("small");
       providerLabel.append(providerCaption, provider, providerHint);
-      const base = input("API 服务地址", "base_url", "url", "固定使用 DeepSeek 官方地址。"); base.control.value = MODEL_PRESETS.deepseek.base_url; base.control.readOnly = true;
-      const model = {wrapper: document.createElement("label"), control: document.createElement("select")};
-      model.wrapper.append(document.createTextNode("模型名称"));
-      model.control.dataset.modelField = "model";
-      for (const value of ["deepseek-flash", "deepseek-v4-pro"]) {
-        const option = document.createElement("option"); option.value = value; option.textContent = value;
-        model.control.append(option);
+      const base = input("API 服务地址", "base_url", "url", " ");
+      const baseList = document.createElement("datalist"); baseList.id = `model-base-options-${connection.id}`;
+      for (const [value, label] of COMPATIBLE_BASES) {
+        const option = document.createElement("option"); option.value = value; option.label = label; baseList.append(option);
       }
-      model.control.value = connection.model || MODEL_PRESETS.deepseek.model;
-      model.wrapper.append(model.control);
+      base.control.setAttribute("list", baseList.id); base.wrapper.append(baseList);
+      const model = {wrapper: document.createElement("label"), control: document.createElement("input")};
+      model.wrapper.append(document.createTextNode("模型名称"));
+      model.control.type = "text"; model.control.dataset.modelField = "model"; model.control.spellcheck = false;
+      const modelList = document.createElement("datalist"); modelList.id = `model-name-options-${connection.id}`;
+      model.control.setAttribute("list", modelList.id);
+      model.wrapper.append(model.control, modelList);
       const key = input("API 密钥", "api_key", "password", "已保存时留空表示不修改。");
       key.control.value = connection.api_key || "";
       key.control.placeholder = connection.key_configured ? "已保存，留空不修改" : "请输入 API 密钥";
-      provider.addEventListener("change", () => {
+      const applyProvider = (reset) => {
+        const deepseek = provider.value === "deepseek";
         const preset = MODEL_PRESETS[provider.value];
-        if (provider.value === "deepseek") {
-          base.control.value = preset.base_url; model.control.value = preset.model;
-        }
-      });
+        providerHint.textContent = deepseek
+          ? "DeepSeek 官方地址固定；解析、评分、邮件与求职助理均可用。"
+          : "任意 OpenAI 兼容服务（/chat/completions）。求职助理与定时任务还需要服务支持 /responses，测试连接会单独提示。";
+        base.control.readOnly = deepseek;
+        base.wrapper.querySelector("small").textContent = deepseek ? "固定使用 DeepSeek 官方地址。" : "填写到 /v1 一级，例如 https://api.openai.com/v1；可从下拉建议中选择。";
+        modelList.replaceChildren(...(deepseek ? ["deepseek-flash", "deepseek-v4-pro"] : COMPATIBLE_MODELS).map((value) => {
+          const option = document.createElement("option"); option.value = value; return option;
+        }));
+        if (reset) { base.control.value = preset.base_url; model.control.value = preset.model; }
+      };
+      base.control.value = connection.base_url || MODEL_PRESETS[provider.value].base_url;
+      model.control.value = connection.model || MODEL_PRESETS[provider.value].model;
+      applyProvider(false);
+      provider.addEventListener("change", () => applyProvider(true));
       const actions = document.createElement("div"); actions.className = "model-connection-actions";
       const test = document.createElement("button"); test.type = "button"; test.className = "button button--secondary"; test.textContent = "测试连接";
       const remove = document.createElement("button"); remove.type = "button"; remove.className = "button button--ghost"; remove.textContent = "删除";
@@ -173,8 +197,8 @@
             model: payload.model,
             api_key: payload.api_key,
           });
-          result.textContent = `连接成功 · ${response.model} · ${response.latency_ms} ms`;
-          result.className = "model-test-result is-success";
+          result.textContent = `连接成功 · ${response.model} · ${response.latency_ms} ms${response.assistant_runtime === false ? ` · ${response.message}` : ""}`;
+          result.className = `model-test-result ${response.assistant_runtime === false ? "is-error" : "is-success"}`;
         } catch (error) { result.textContent = error.message; result.className = "model-test-result is-error"; }
         finally { test.disabled = false; }
       });
@@ -226,7 +250,7 @@
       renderReadiness(payload);
       workingProfile = structuredClone(payload.profile);
       modelConnections = payload.model_connections.map((item) => ({...item}));
-      inlineMessage("model-connection-message", payload.model_migration_required ? "旧连接不是受支持的 DeepSeek 官方连接，已停止使用。请重新填写官方密钥；岗位和简历数据不受影响。" : "", Boolean(payload.model_migration_required));
+      inlineMessage("model-connection-message", payload.model_migration_required ? "旧连接的地址或协议不受支持，已停止使用。请重新选择 DeepSeek 官方或 OpenAI 兼容服务并填写密钥；岗位和简历数据不受影响。" : "", Boolean(payload.model_migration_required));
       activeModelConnectionId = payload.active_model_connection_id;
       renderModelConnections();
       for (const [key, value] of Object.entries(payload.settings)) {
@@ -319,7 +343,7 @@
       key_configured: modelConnections.find((saved) => saved.id === item.id)?.key_configured || false,
     }));
     const id = `model-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
-    modelConnections.push({id, name: "备用 DeepSeek 连接", provider: "deepseek", ...MODEL_PRESETS.deepseek, key_configured: false});
+    modelConnections.push({id, name: "备用连接", provider: "openai_compatible", ...MODEL_PRESETS.openai_compatible, key_configured: false});
     renderModelConnections();
     inlineMessage("model-connection-message", "已添加备用连接，请填写后保存。", false);
   });

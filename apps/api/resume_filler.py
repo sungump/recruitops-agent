@@ -30,6 +30,7 @@ class Registration(BaseModel):
     title: str = Field(min_length=1, max_length=512)
     record_url: str = Field(max_length=2048)
     city: str = Field(default="", max_length=255)
+    resume_name: str = Field(default="", max_length=80)
     progress_url_confirmed: bool = False
 
     @field_validator("company", "title")
@@ -149,7 +150,10 @@ def register(body: Registration, authorization: str | None = Header(default=None
             row = ApplicationSnapshot(id="resume-" + identity[:24], company_name=body.company,
                 job_title=body.title, job_id=body.job_id, record_url=body.record_url or None, stage="applied",
                 idempotency_key="resume-filler:" + identity, source="resume_filler", source_ref=identity,
-                note=body.city, stage_history=[{"stage": "applied", "source": "resume_filler", "at": now}])
+                note=body.city, stage_history=[{"stage": "applied", "source": "resume_filler", "at": now,
+                                                **({"resume": body.resume_name.strip(),
+                                                    "note": "使用简历：" + body.resume_name.strip()}
+                                                   if body.resume_name.strip() else {})}])
             try:
                 with session.begin_nested():
                     session.add(row)

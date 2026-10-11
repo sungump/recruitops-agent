@@ -364,3 +364,42 @@ test('local JSON validator bounds complexity and rejects non-JSON values without
   }
   assert.equal(called,false);
 });
+
+test('batch resume import creates one profile per file, seeded from the active profile, and refreshes same-name attachments',async t=>{
+  const f=fixture(t);
+  f.store.saveProfile({basic:{fullName:'Seed Synthetic',email:'seed@example.invalid'}});
+  f.store.saveSettings({customAnswers:[{id:'a1',label:'Synthetic question',value:'Synthetic answer'}],recruitCompanyByHost:{'x.example':'X'}});
+  const first=f.store.importResumeFiles([selected(f,'简历-嵌入式.pdf','synthetic-embedded'),selected(f,'简历-算法.docx','synthetic-ml')],f.store.snapshot().revision);
+  assert.deepEqual(first.created,['简历-嵌入式','简历-算法']);assert.deepEqual(first.updated,[]);
+  const snapshot=f.store.snapshot();
+  assert.equal(snapshot.activeProfileName,'简历-嵌入式');assert.equal(snapshot.attachment.name,'简历-嵌入式.pdf');
+  assert.equal(snapshot.profile.basic.fullName,'Seed Synthetic');
+  assert.equal(snapshot.settings.customAnswers[0].value,'Synthetic answer');
+  assert.equal(snapshot.settings.recruitCompanyByHost,undefined);
+  assert.deepEqual(snapshot.personalProfiles.map(item=>[item.name,item.attachmentName]),
+    [['个人资料',null],['简历-嵌入式','简历-嵌入式.pdf'],['简历-算法','简历-算法.docx']]);
+  await f.store.withAttachment(async file=>assert.equal(fs.readFileSync(io(file),'utf8'),'synthetic-embedded'));
+  const oldId=snapshot.attachment.id;
+  const again=f.store.importResumeFiles([selected(f,'简历-嵌入式.pdf','synthetic-embedded-v2')],snapshot.revision);
+  assert.deepEqual(again,{created:[],updated:['简历-嵌入式'],activeProfileName:'简历-嵌入式'});
+  assert.equal(f.store.snapshot().personalProfiles.length,3);assert.notEqual(f.store.snapshot().attachment.id,oldId);
+  await new FillerStore(f.options).withAttachment(async file=>assert.equal(fs.readFileSync(io(file),'utf8'),'synthetic-embedded-v2'));
+  assert.throws(()=>f.store.importResumeFiles([selected(f,'a.pdf'),selected(f,'A.pdf')],f.store.snapshot().revision),/duplicate_name/);
+  assert.throws(()=>f.store.importResumeFiles([selected(f,'b.pdf')],0),/stale_revision/);
+  assert.throws(()=>f.store.importResumeFiles([selected(f,'c.txt')],f.store.snapshot().revision),/attachment_invalid/);
+  assert.equal(f.store.snapshot().personalProfiles.length,3);
+});
+
+test('shared settings follow the instance rather than the active resume profile',t=>{
+  const f=fixture(t);
+  f.store.saveSettings({applicationQueue:{instanceId:'q',items:[{id:'legacy'}]},answer:'primary'});
+  const primaryId=f.store.snapshot().activeProfileId;
+  f.store.createProfile('Second',f.store.snapshot().revision);
+  assert.deepEqual(f.store.sharedSetting('applicationQueue').items,[{id:'legacy'}]);
+  f.store.saveSharedSetting('applicationQueue',{instanceId:'q',items:[{id:'legacy'},{id:'new'}]});
+  const reopened=new FillerStore(f.options);
+  reopened.selectProfile(primaryId,reopened.snapshot().revision);
+  assert.equal(reopened.sharedSetting('applicationQueue').items.length,2);
+  assert.equal(reopened.snapshot().settings.applicationQueue,undefined);
+  assert.equal(reopened.snapshot().settings.answer,'primary');
+});

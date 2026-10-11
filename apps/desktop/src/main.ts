@@ -96,7 +96,7 @@ function state() {
     filler: { available:!!filler, open:fillerOpen, ...engine,
       supportedActions: ['filler-open','filler-close','filler-profile-save','filler-profile-import','filler-profile-export',
         'filler-profile-create','filler-profile-select','filler-profile-rename','filler-profile-delete','filler-stop',
-        'filler-attachment-select','filler-attachment-clear','filler-attachment-upload','filler-demo-enable','filler-demo-restore','filler-scan','filler-frame-allow',
+        'filler-attachment-select','filler-attachment-clear','filler-attachment-upload','filler-resume-import','filler-demo-enable','filler-demo-restore','filler-scan','filler-frame-allow',
         'filler-prepare','filler-fill','filler-undo','filler-custom-save','filler-custom-delete',
         'filler-application-detect','filler-application-save','filler-application-save-batch','filler-application-flush','filler-application-cancel',
         'filler-application-retry','filler-application-correct','filler-application-sync-page'],
@@ -153,13 +153,13 @@ async function initializeFillerInstance() {
   }
   refreshFillerStoreSnapshot();
   const queueStore = {
+    // One queue for the instance, whichever resume profile is active when it changes.
     load: async () => {
-      const value=fillerStore?.snapshot().settings.applicationQueue;
+      const value=fillerStore?.sharedSetting('applicationQueue');
       return value && typeof value==='object' && !Array.isArray(value) ? value as {instanceId:string;items:PendingRegistration[]} : undefined;
     },
     save: async (value:{instanceId:string;items:PendingRegistration[]}) => {
-      const settings={...(fillerStore?.snapshot().settings || {}),applicationQueue:value};
-      fillerStoreSnapshot=fillerStore!.saveSettings(settings); applicationQueue=structuredClone(value.items); publish();
+      fillerStoreSnapshot=fillerStore!.saveSharedSetting('applicationQueue',value); applicationQueue=structuredClone(value.items); publish();
     },
   };
   fillerApplications = new FillerApplicationService(id, () => runtime?.origin && runtime.state.status==='ready'
@@ -499,6 +499,12 @@ function rememberRecruitCompany(url: string, company: string) {
   refreshFillerStoreSnapshot();
 }
 
+/** The personal resume version in use, recorded with each new application. */
+function usedResume(): {resume_name?: string} {
+  const snapshot=fillerStoreSnapshot;
+  return snapshot?.mode==='personal'&&snapshot.activeProfileName ? {resume_name:snapshot.activeProfileName} : {};
+}
+
 async function execute(raw: unknown) {
   const command = parseCommand(raw);
   if (['home','select','close','capture'].includes(command.action)) fillerOpen=false;
@@ -511,7 +517,7 @@ async function execute(raw: unknown) {
     if(command.action==='filler-open') fillerOpen=true;
     if(command.action==='filler-plugin' || command.action==='filler-profile') throw new Error('桌面版已内置填写引擎，请在“简历资料”中导入 JSON。');
     if(!fillerStore || !fillerStoreSnapshot) throw new Error('简历资料存储尚未就绪，请稍后重试。');
-    if(filler.snapshot(wc).busy && /^(filler-profile-|filler-demo-|filler-custom-|filler-attachment-)/.test(command.action)) {
+    if(filler.snapshot(wc).busy && /^(filler-profile-|filler-demo-|filler-custom-|filler-attachment-|filler-resume-)/.test(command.action)) {
       throw new Error('填写操作尚未结束，请先停止并等待结束后再修改资料或附件。');
     }
     if(command.action==='filler-profile-save') {
@@ -540,10 +546,21 @@ async function execute(raw: unknown) {
       if(!selection.canceled&&selection.filePaths.length===1) fillerStoreSnapshot=fillerStore.replaceAttachment(selection.filePaths[0]);
     }
     if(command.action==='filler-attachment-clear') fillerStoreSnapshot=fillerStore.clearAttachment();
+    if(command.action==='filler-resume-import') {
+      const selection=await dialog.showOpenDialog(window,{title:'批量导入简历（每个文件成为一份以文件名命名的资料）',
+        properties:['openFile','multiSelections'],filters:[{name:'简历附件',extensions:['pdf','doc','docx']}]});
+      if(!selection.canceled&&selection.filePaths.length) {
+        if(selection.filePaths.length>20) throw new Error('一次最多导入 20 份简历。');
+        const result=fillerStore.importResumeFiles(selection.filePaths,command.expectedVersion);
+        refreshFillerStoreSnapshot();
+        notice=[result.created.length?`新建 ${result.created.length} 份简历资料`:'',result.updated.length?`更新 ${result.updated.length} 份同名资料的附件`:'']
+          .filter(Boolean).join('，')+`；当前使用「${result.activeProfileName}」。新资料已复制当前资料的个人信息和自定义答案。`;
+      }
+    }
     if(command.action==='filler-attachment-upload') {
       let confirmed=command.confirmed===true;
       if(!confirmed) {
-        const confirmation=await dialog.showMessageBox(window,{type:'question',buttons:['取消','确认上传'],defaultId:0,cancelId:0,message:'上传默认简历到当前官网？',detail:`${wc.getURL()}\n${fillerStoreSnapshot.attachment?.name||''}\n网站接收后的文件不能通过本地撤销收回。`});
+        const confirmation=await dialog.showMessageBox(window,{type:'question',buttons:['取消','确认上传'],defaultId:0,cancelId:0,message:`上传简历「${fillerStoreSnapshot.activeProfileName}」到当前官网？`,detail:`${wc.getURL()}\n${fillerStoreSnapshot.attachment?.name||''}\n网站接收后的文件不能通过本地撤销收回。`});
         confirmed=confirmation.response===1;
       }
       if(confirmed) {
@@ -645,7 +662,7 @@ async function execute(raw: unknown) {
       const id=runtime?.state.instanceId;if(!id)throw new Error('本地实例尚未就绪。');
       const context=filler.pageContext(wc,id);if(!context)throw new Error('当前页面已变化。');
       const result=await fillerApplications.register(context,{company:command.company,title:command.title,record_url:command.recordUrl,
-        ...(command.city?{city:command.city}:{}),progress_url_confirmed:true},true);
+        ...(command.city?{city:command.city}:{}),...usedResume(),progress_url_confirmed:true},true);
       applicationQueue=await fillerApplications.pending();applicationMessage=(result as any).queued?'本地服务暂不可用，已加入待补传队列。':
         command.recordUrl?'投递记录已保存。':'投递记录已保存；进度链接待补，官网状态暂不能自动复核。';
       try {rememberRecruitCompany(command.recordUrl,command.company);} catch { /* Registration is already committed. */ }
@@ -664,7 +681,7 @@ async function execute(raw: unknown) {
       const context=filler.pageContext(wc,id);if(!context)throw new Error('当前页面已变化。');
       applicationBatchResults=[];
       applicationBatchResults=await fillerApplications.registerBatch(context,command.records.map(record=>({
-        company:record.company,title:record.title,record_url:record.recordUrl,city:record.city,progress_url_confirmed:true})),true);
+        company:record.company,title:record.title,record_url:record.recordUrl,city:record.city,...usedResume(),progress_url_confirmed:true})),true);
       applicationQueue=await fillerApplications.pending();
       if(applicationBatchResults.some(row=>row.status==='saved'||row.status==='queued'))
         try {rememberRecruitCompany(context.url,command.records[0].company);} catch { /* Registration is already committed. */ }

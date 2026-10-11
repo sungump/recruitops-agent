@@ -124,10 +124,13 @@ function collectProtocolFrames(tree: any) {
   const visit = (entry: any, root: boolean) => {
     const frame = entry?.frame;
     if (!frame || typeof frame.id !== 'string' || typeof frame.url !== 'string'
+        || (frame.urlFragment !== undefined && typeof frame.urlFragment !== 'string')
         || typeof frame.securityOrigin !== 'string' || typeof frame.loaderId !== 'string' || !frame.loaderId) {
       fail('filler_executor_protocol_frame_incomplete');
     }
-    frames.push({ id: frame.id, url: frame.url, securityOrigin: frame.securityOrigin, loaderId: frame.loaderId, root });
+    // CDP separates the hash from url, whereas WebFrameMain.url includes it.
+    const url = frame.url + (frame.urlFragment || '');
+    frames.push({ id: frame.id, url, securityOrigin: frame.securityOrigin, loaderId: frame.loaderId, root });
     for (const child of entry.childFrames || []) visit(child, false);
   };
   visit(tree?.frameTree, true);
